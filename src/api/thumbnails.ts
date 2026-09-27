@@ -1,39 +1,26 @@
 import { getBearerToken, validateJWT } from "../auth";
 import { respondWithJSON } from "./json";
-import { getVideo } from "../db/videos";
+import { getVideo, updateVideo, type Video } from "../db/videos";
 import type { ApiConfig } from "../config";
 import type { BunRequest } from "bun";
 import { BadRequestError, NotFoundError } from "./errors";
+import path from "node:path"
 
 type Thumbnail = {
   data: ArrayBuffer;
   mediaType: string;
 };
 
+const MAX_UPLOAD_SIZE = 10 << 20;
+
 const videoThumbnails: Map<string, Thumbnail> = new Map();
 
-export async function handlerGetThumbnail(cfg: ApiConfig, req: BunRequest) {
-  const { videoId } = req.params as { videoId?: string };
-  if (!videoId) {
-    throw new BadRequestError("Invalid video ID");
+function getVideoFileExtension(filetype: string) {
+  const parts = filetype.split("/");
+  if (parts.length !== 2) {
+    return ".bin";
   }
-
-  const video = getVideo(cfg.db, videoId);
-  if (!video) {
-    throw new NotFoundError("Couldn't find video");
-  }
-
-  const thumbnail = videoThumbnails.get(videoId);
-  if (!thumbnail) {
-    throw new NotFoundError("Thumbnail not found");
-  }
-
-  return new Response(thumbnail.data, {
-    headers: {
-      "Content-Type": thumbnail.mediaType,
-      "Cache-Control": "no-store",
-    },
-  });
+  return parts[1];
 }
 
 export async function handlerUploadThumbnail(cfg: ApiConfig, req: BunRequest) {
@@ -41,7 +28,6 @@ export async function handlerUploadThumbnail(cfg: ApiConfig, req: BunRequest) {
   if (!videoId) {
     throw new BadRequestError("Invalid video ID");
   }
-
   const token = getBearerToken(req.headers);
   const userID = validateJWT(token, cfg.jwtSecret);
 
@@ -49,5 +35,27 @@ export async function handlerUploadThumbnail(cfg: ApiConfig, req: BunRequest) {
 
   // TODO: implement the upload here
 
-  return respondWithJSON(200, null);
+  const formData = await req.formData();
+  const file = formData.get("thumbnail");
+  const video = getVideo(cfg.db, videoId);
+  if (!(file instanceof File)) {
+    throw new BadRequestError("Thumbnail file missing");
+  }
+  if (!["image/jpeg", "image/png"].includes(file.type)) {
+    throw new BadRequestError("Invalid thumbnail type");
+  }
+  const buf = await file.arrayBuffer();
+  if (!video) {
+    throw new BadRequestError("Video id does not exist");
+  }
+  const thumbnailObj: Thumbnail = {
+    data: buf,
+    mediaType: file.type,
+  }
+  videoThumbnails.set(videoId, thumbnailObj);
+  const videoFileExt = getVideoFileExtension(file.type);
+  video.thumbnailURL = `http://localhost:${cfg.port}/assets/${videoId}.${videoFileExt}`;
+  Bun.write(path.join(cfg.assetsRoot, `${videoId}.${videoFileExt}`), buf);
+  updateVideo(cfg.db, video);
+  return respondWithJSON(200, video);
 }
